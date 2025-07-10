@@ -43,7 +43,7 @@ func (r DynamicResolver) Deallocate(taskRun *ReconcileTaskRun, ctx context.Conte
 	return nil
 }
 
-func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context, tr *v1.TaskRun, secretName string) (reconcile.Result, error) {
+func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context, original, tr *v1.TaskRun, secretName string) (reconcile.Result, error) {
 
 	log := logr.FromContextOrDiscard(ctx)
 	if tr.Annotations[FailedHosts] != "" {
@@ -65,7 +65,7 @@ func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context
 				if terr != nil {
 					log.Error(err, "Failed to terminate instance")
 				}
-				unassignErr := r.removeInstanceFromTask(taskRun, ctx, tr)
+				unassignErr := r.removeInstanceFromTask(taskRun, ctx, original, tr)
 				if unassignErr != nil {
 					log.Error(unassignErr, "Could not unassign task after timeout")
 				}
@@ -90,7 +90,7 @@ func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context
 				r.eventRecorder.Event(tr, "Normal", "TerminateFailed", message)
 				log.Error(terr, message)
 			}
-			unassignErr := r.removeInstanceFromTask(taskRun, ctx, tr)
+			unassignErr := r.removeInstanceFromTask(taskRun, ctx, original, tr)
 			if unassignErr != nil {
 				log.Error(unassignErr, "failed to unassign instance from task after instance address retrieval failure")
 			}
@@ -98,7 +98,7 @@ func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context
 		} else if address != "" { // An IP address was successfully retrieved for the the VM
 			tr.Labels[AssignedHost] = tr.Annotations[CloudInstanceId]
 			tr.Annotations[CloudAddress] = address
-			err := UpdateTaskRunWithRetry(ctx, taskRun.client, taskRun.apiReader, tr, 3)
+			err := PatchTaskRunWithRetry(ctx, taskRun.client, original, tr)
 			if err != nil {
 				return reconcile.Result{}, err
 			}
@@ -113,7 +113,7 @@ func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context
 					message := fmt.Sprintf("failed to terminate %s instance for %s", r.instanceTag, tr.Name)
 					log.Error(terr, message)
 				}
-				unassignErr := r.removeInstanceFromTask(taskRun, ctx, tr)
+				unassignErr := r.removeInstanceFromTask(taskRun, ctx, original, tr)
 				if unassignErr != nil {
 					log.Error(unassignErr, "failed to unassign instance from task after provisioning failure")
 				} else {
@@ -140,7 +140,7 @@ func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context
 					r.eventRecorder.Event(tr, "Normal", "TerminateFailed", message)
 					log.Error(terr, message)
 				}
-				unassignErr := r.removeInstanceFromTask(taskRun, ctx, tr)
+				unassignErr := r.removeInstanceFromTask(taskRun, ctx, original, tr)
 				if unassignErr != nil {
 					msg := fmt.Sprintf("failed to unassign instance %s from task after instance termination", r.instanceTag)
 					log.Error(unassignErr, msg)
@@ -168,7 +168,7 @@ func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context
 		//no host available
 		//add the waiting label
 		tr.Labels[WaitingForPlatformLabel] = platformLabel(r.platform)
-		if err := UpdateTaskRunWithRetry(ctx, taskRun.client, taskRun.apiReader, tr, 3); err != nil {
+		if err := PatchTaskRunWithRetry(ctx, taskRun.client, original, tr); err != nil {
 			log.Error(err, "Failed to update task with waiting label. Will retry.")
 		}
 		return reconcile.Result{RequeueAfter: time.Minute}, nil
@@ -201,8 +201,7 @@ func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context
 		}
 		failureCount++
 		tr.Annotations[CloudFailures] = strconv.Itoa(failureCount)
-		err = UpdateTaskRunWithRetry(ctx, taskRun.client, taskRun.apiReader, tr, 3)
-		if err != nil {
+		if err := PatchTaskRunWithRetry(ctx, taskRun.client, original, tr); err != nil {
 			//todo: handle conflict properly, for now you get an extra retry
 			log.Error(err, "failed to update failure count")
 		}
@@ -219,8 +218,7 @@ func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context
 	controllerutil.AddFinalizer(tr, PipelineFinalizer)
 
 	log.Info("updating instance id of cloud host", "instance", instance)
-	err = UpdateTaskRunWithRetry(ctx, taskRun.client, taskRun.apiReader, tr, 5)
-	if err != nil {
+	if err := PatchTaskRunWithRetry(ctx, taskRun.client, original, tr); err != nil {
 		log.Error(err, "failed to update TaskRun with instance ID after retries")
 		err2 := r.CloudProvider.TerminateInstance(taskRun.client, ctx, instance)
 		if err2 != nil {
@@ -234,9 +232,9 @@ func (r DynamicResolver) Allocate(taskRun *ReconcileTaskRun, ctx context.Context
 }
 
 // Tries to remove the instance information from the task and returns a non-nil error if it was unable to.
-func (dr DynamicResolver) removeInstanceFromTask(reconcileTaskRun *ReconcileTaskRun, ctx context.Context, taskRun *v1.TaskRun) error {
+func (dr DynamicResolver) removeInstanceFromTask(reconcileTaskRun *ReconcileTaskRun, ctx context.Context, original, taskRun *v1.TaskRun) error {
 	delete(taskRun.Labels, AssignedHost)
 	delete(taskRun.Annotations, CloudInstanceId)
 	delete(taskRun.Annotations, CloudDynamicPlatform)
-	return UpdateTaskRunWithRetry(ctx, reconcileTaskRun.client, reconcileTaskRun.apiReader, taskRun, 3)
+	return PatchTaskRunWithRetry(ctx, reconcileTaskRun.client, original, taskRun)
 }

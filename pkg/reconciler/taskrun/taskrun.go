@@ -23,6 +23,7 @@ import (
 	k8sRuntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/strings/slices"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -146,10 +147,10 @@ func (r *ReconcileTaskRun) Reconcile(ctx context.Context, request reconcile.Requ
 	}
 	ctx = logr.NewContext(ctx, log)
 
-	return r.handleTaskRunReceived(ctx, &tr)
+	return r.handleTaskRunReceived(ctx, tr.DeepCopy(), &tr)
 }
 
-func (r *ReconcileTaskRun) handleTaskRunReceived(ctx context.Context, tr *tektonapi.TaskRun) (reconcile.Result, error) {
+func (r *ReconcileTaskRun) handleTaskRunReceived(ctx context.Context, original, tr *tektonapi.TaskRun) (reconcile.Result, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("taskrun", tr.Name, "namespace", tr.Namespace)
 
 	// Handle internal task types first
@@ -205,7 +206,7 @@ func (r *ReconcileTaskRun) handleTaskRunReceived(ctx context.Context, tr *tekton
 	}
 
 	log.Info("Reconciling user task")
-	return r.handleUserTask(ctx, tr)
+	return r.handleUserTask(ctx, original, tr)
 }
 
 func (r *ReconcileTaskRun) handleCleanTask(ctx context.Context, tr *tektonapi.TaskRun) (reconcile.Result, error) {
@@ -419,7 +420,7 @@ func (r *ReconcileTaskRun) createErrorSecret(ctx context.Context, tr *tektonapi.
 	return nil
 }
 
-func (r *ReconcileTaskRun) handleUserTask(ctx context.Context, tr *tektonapi.TaskRun) (reconcile.Result, error) {
+func (r *ReconcileTaskRun) handleUserTask(ctx context.Context, original, tr *tektonapi.TaskRun) (reconcile.Result, error) {
 	log := logr.FromContextOrDiscard(ctx)
 	secretName := SecretPrefix + tr.Name
 	if tr.Labels != nil && tr.Labels[AssignedHost] != "" {
@@ -451,7 +452,7 @@ func (r *ReconcileTaskRun) handleUserTask(ctx context.Context, tr *tektonapi.Tas
 		tr.Labels[TargetPlatformLabel] = platformLabel(targetPlatform)
 	}
 
-	res, err := r.handleHostAllocation(ctx, tr, secretName, targetPlatform)
+	res, err := r.handleHostAllocation(ctx, original, tr, secretName, targetPlatform)
 	if err != nil && !errors.IsConflict(err) {
 		mpcmetrics.HandleMetrics(targetPlatform, func(metrics *mpcmetrics.PlatformMetrics) {
 			metrics.HostAllocationFailures.Inc()
@@ -473,7 +474,7 @@ func extractPlatform(tr *tektonapi.TaskRun) (string, error) {
 	return "", errFailedToDeterminePlatform
 }
 
-func (r *ReconcileTaskRun) handleHostAllocation(ctx context.Context, tr *tektonapi.TaskRun, secretName string, targetPlatform string) (reconcile.Result, error) {
+func (r *ReconcileTaskRun) handleHostAllocation(ctx context.Context, original, tr *tektonapi.TaskRun, secretName string, targetPlatform string) (reconcile.Result, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("platform", targetPlatform, "secretName", secretName)
 	log.Info("attempting to allocate host")
 	//check the secret does not already exist
@@ -515,7 +516,7 @@ func (r *ReconcileTaskRun) handleHostAllocation(ctx context.Context, tr *tektona
 		}
 	}
 
-	ret, err := hosts.Allocate(r, ctx, tr, secretName)
+	ret, err := hosts.Allocate(r, ctx, original, tr, secretName)
 	isWaiting := tr.Labels[WaitingForPlatformLabel] != ""
 
 	if err != nil {
@@ -893,7 +894,7 @@ func (r *ReconcileTaskRun) readConfiguration(ctx context.Context, targetPlatform
 }
 
 type PlatformConfig interface {
-	Allocate(r *ReconcileTaskRun, ctx context.Context, tr *tektonapi.TaskRun, secretName string) (reconcile.Result, error)
+	Allocate(r *ReconcileTaskRun, ctx context.Context, original, tr *tektonapi.TaskRun, secretName string) (reconcile.Result, error)
 	Deallocate(r *ReconcileTaskRun, ctx context.Context, tr *tektonapi.TaskRun, secretName string, selectedHost string) error
 }
 
@@ -971,103 +972,15 @@ func platformLabel(platform string) string {
 	return strings.ReplaceAll(platform, "/", "-")
 }
 
-// UpdateTaskRunWithRetry performs a conflict-resilient update of a TaskRun object.
+// PatchTaskRunWithRetry performs a conflict-resilient update of a TaskRun object.
 // On conflict, it fetches the latest version and merges labels, annotations, and finalizers from the incoming TaskRun.
-func UpdateTaskRunWithRetry(ctx context.Context, client client.Client, apiReader client.Reader, tr *tektonapi.TaskRun, maxRetries int) error {
-	log := logr.FromContextOrDiscard(ctx)
-	if maxRetries <= 0 {
-		maxRetries = 5
-	}
+func PatchTaskRunWithRetry(ctx context.Context, cli client.Client, original, mutated *tektonapi.TaskRun) error {
+	// build the patch
+	patch := client.StrategicMergeFrom(original.DeepCopy())
 
-	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		// Attempt to update the TaskRun
-		err := client.Update(ctx, tr)
-		if err == nil {
-			// Success!
-			if attempt > 0 {
-				log.Info("TaskRun update succeeded after retries", "attempts", attempt+1)
-			}
-			return nil
-		}
-
-		// Check if it's a conflict error
-		if !errors.IsConflict(err) {
-			// Non-conflict error - fail immediately
-			return fmt.Errorf("failed to update TaskRun: %w", err)
-		}
-
-		// Handle conflict error
-		lastErr = err
-		log.Info("Conflict detected, retrying update", "attempt", attempt+1, "maxRetries", maxRetries)
-
-		// If this is the last attempt, don't fetch
-		if attempt == maxRetries-1 {
-			break
-		}
-
-		// Store the desired labels, annotations, and finalizers
-		desiredLabels := make(map[string]string)
-		desiredAnnotations := make(map[string]string)
-		desiredFinalizers := make([]string, 0)
-
-		if tr.Labels != nil {
-			for k, v := range tr.Labels {
-				desiredLabels[k] = v
-			}
-		}
-		if tr.Annotations != nil {
-			for k, v := range tr.Annotations {
-				desiredAnnotations[k] = v
-			}
-		}
-		if tr.Finalizers != nil {
-			desiredFinalizers = append(desiredFinalizers, tr.Finalizers...)
-		}
-
-		// Fetch the latest version of the TaskRun
-		namespacedName := types.NamespacedName{
-			Namespace: tr.Namespace,
-			Name:      tr.Name,
-		}
-
-		if err := apiReader.Get(ctx, namespacedName, tr); err != nil {
-			return fmt.Errorf("failed to fetch latest TaskRun version: %w", err)
-		}
-
-		// Ensure maps exist
-		if tr.Labels == nil {
-			tr.Labels = make(map[string]string)
-		}
-		if tr.Annotations == nil {
-			tr.Annotations = make(map[string]string)
-		}
-		if tr.Finalizers == nil {
-			tr.Finalizers = make([]string, 0)
-		}
-
-		// Merge desired labels and annotations into the fresh TaskRun
-		for k, v := range desiredLabels {
-			tr.Labels[k] = v
-		}
-		for k, v := range desiredAnnotations {
-			tr.Annotations[k] = v
-		}
-
-		// Merge finalizers (avoid duplicates)
-		for _, finalizer := range desiredFinalizers {
-			found := false
-			for _, existing := range tr.Finalizers {
-				if existing == finalizer {
-					found = true
-					break
-				}
-			}
-			if !found {
-				tr.Finalizers = append(tr.Finalizers, finalizer)
-			}
-		}
-	}
-
-	return fmt.Errorf("failed to update TaskRun after %d attempts, last error: %w", maxRetries, lastErr)
+  // retry until non-conflict error or timeout
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// apply the patch
+		return cli.Patch(ctx, mutated, patch)
+	})
 }
