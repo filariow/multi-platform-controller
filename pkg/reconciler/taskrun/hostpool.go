@@ -23,7 +23,7 @@ type HostPool struct {
 	targetPlatform string
 }
 
-func (hp HostPool) Allocate(r *ReconcileTaskRun, ctx context.Context, original, tr *v1.TaskRun, secretName string) (reconcile.Result, error) {
+func (hp HostPool) Allocate(r *ReconcileTaskRun, ctx context.Context, tr *v1.TaskRun, secretName string) (reconcile.Result, error) {
 	log := logr.FromContextOrDiscard(ctx)
 
 	if len(hp.hosts) == 0 {
@@ -86,7 +86,7 @@ func (hp HostPool) Allocate(r *ReconcileTaskRun, ctx context.Context, original, 
 		//TODO: is the requeue actually a good idea?
 		//TODO: timeout
 		tr.Labels[WaitingForPlatformLabel] = platformLabel(hp.targetPlatform)
-		if err := PatchTaskRunWithRetry(ctx, r.client, original, tr); err != nil {
+		if err := PatchTaskRunWithRetryFromContextOrPanic(ctx, r.client, tr); err != nil {
 			return reconcile.Result{}, err
 		}
 		return reconcile.Result{RequeueAfter: time.Minute}, nil
@@ -97,7 +97,7 @@ func (hp HostPool) Allocate(r *ReconcileTaskRun, ctx context.Context, original, 
 	delete(tr.Labels, WaitingForPlatformLabel)
 	//add a finalizer to clean up the secret
 	controllerutil.AddFinalizer(tr, PipelineFinalizer)
-	if err := PatchTaskRunWithRetry(ctx, r.client, original, tr); err != nil {
+	if err := PatchTaskRunWithRetryFromContextOrPanic(ctx, r.client, tr); err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -108,7 +108,7 @@ func (hp HostPool) Allocate(r *ReconcileTaskRun, ctx context.Context, original, 
 		log.Error(err, "failed to launch provisioning task, unassigning host")
 		delete(tr.Labels, AssignedHost)
 		controllerutil.RemoveFinalizer(tr, PipelineFinalizer)
-		if updateErr := PatchTaskRunWithRetry(ctx, r.client, original, tr); updateErr != nil {
+		if updateErr := PatchTaskRunWithRetryFromContextOrPanic(ctx, r.client, tr); updateErr != nil {
 			log.Error(updateErr, "Could not unassign task after provisioning failure")
 			return reconcile.Result{}, err
 		}

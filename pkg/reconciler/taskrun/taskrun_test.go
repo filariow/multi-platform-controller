@@ -746,8 +746,8 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			Expect(client.Create(context.Background(), tr)).To(Succeed())
 		})
 
-		It("should update TaskRun successfully on first attempt", func(ctx SpecContext) {
-			original := tr.DeepCopy()
+		It("should update TaskRun successfully on first attempt", func(ctx context.Context) {
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
 
 			// Modify the TaskRun
 			tr.Labels["new-label"] = "new-value"
@@ -755,7 +755,7 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			tr.Finalizers = append(tr.Finalizers, "new-finalizer")
 
 			// Update should succeed immediately
-			err := PatchTaskRunWithRetry(ctx, client, original, tr)
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, client, tr)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Verify the update was applied
@@ -768,8 +768,8 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			Expect(updated.Finalizers).To(ContainElements("existing-finalizer", "new-finalizer"))
 		})
 
-		It("should handle conflict errors with retry and merge", func(ctx SpecContext) {
-			original := tr.DeepCopy()
+		It("should handle conflict errors with retry and merge", func(ctx context.Context) {
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
 
 			// Create a conflicting client that will cause conflicts
 			conflictingClient := &ConflictingClient{
@@ -783,7 +783,7 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			tr.Finalizers = append(tr.Finalizers, "conflict-finalizer")
 
 			// Should succeed after retries
-			err := PatchTaskRunWithRetry(ctx, conflictingClient, original, tr)
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, conflictingClient, tr)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Verify the update was applied
@@ -794,8 +794,8 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			Expect(updated.Finalizers).To(ContainElement("conflict-finalizer"))
 		})
 
-		It("should merge labels and annotations correctly after conflict", func(ctx SpecContext) {
-			original := tr.DeepCopy()
+		It("should merge labels and annotations correctly after conflict", func(ctx context.Context) {
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
 
 			// First, update the TaskRun externally to simulate concurrent modification
 			external := &pipelinev1.TaskRun{}
@@ -817,7 +817,7 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			tr.Finalizers = append(tr.Finalizers, "local-finalizer")
 
 			// Update should succeed and merge both changes
-			err := PatchTaskRunWithRetry(ctx, conflictingClient, original, tr)
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, conflictingClient, tr)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Verify both sets of changes are present
@@ -832,8 +832,8 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			Expect(updated.Finalizers).To(ContainElements("existing-finalizer", "local-finalizer", "external-finalizer"))
 		})
 
-		It("should not reintroduce fields removed from concurrent updates", func(ctx SpecContext) {
-			original := tr.DeepCopy()
+		It("should not reintroduce fields removed from concurrent updates", func(ctx context.Context) {
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
 
 			// First, a controller removed its annotations, labels, and finalizers
 			external := &pipelinev1.TaskRun{}
@@ -855,7 +855,7 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			tr.Finalizers = append(tr.Finalizers, "local-finalizer")
 
 			// Update should succeed and merge both changes
-			err := PatchTaskRunWithRetry(ctx, conflictingClient, original, tr)
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, conflictingClient, tr)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Verify both sets of changes are present
@@ -868,7 +868,7 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			Expect(updated.Finalizers).To(ConsistOf("local-finalizer"))
 		})
 
-		It("should handle nil maps gracefully", func(ctx SpecContext) {
+		It("should handle nil maps gracefully", func(ctx context.Context) {
 			// Create TaskRun with nil maps
 			nilTr := &pipelinev1.TaskRun{
 				ObjectMeta: metav1.ObjectMeta{
@@ -882,14 +882,14 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 				},
 			}
 			Expect(client.Create(ctx, nilTr)).To(Succeed())
-			original := nilTr.DeepCopy()
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, nilTr.DeepCopy())
 
 			// Add some data to nil maps
 			nilTr.Labels = map[string]string{"new-label": "new-value"}
 			nilTr.Annotations = map[string]string{"new-annotation": "new-value"}
 			nilTr.Finalizers = []string{"new-finalizer"}
 
-			err := PatchTaskRunWithRetry(ctx, client, original, nilTr)
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, client, nilTr)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Verify the update was applied
@@ -900,7 +900,7 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			Expect(updated.Finalizers).To(ContainElement("new-finalizer"))
 		})
 
-		It("should fail immediately on non-conflict errors", func(ctx SpecContext) {
+		It("should fail immediately on non-conflict errors", func(ctx context.Context) {
 			// Create a client that returns non-conflict errors
 			errorClient := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
 				Get: func(ctx context.Context, client runtimeclient.WithWatch, key runtimeclient.ObjectKey, obj runtimeclient.Object, opts ...runtimeclient.GetOption) error {
@@ -911,28 +911,45 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 				},
 			}).Build()
 
-			original := tr.DeepCopy()
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
 			tr.Labels["error-label"] = "error-value"
 
-			err := PatchTaskRunWithRetry(ctx, errorClient, original, tr)
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, errorClient, tr)
 			Expect(err).To(HaveOccurred())
 			Expect(err).ToNot(Satisfy(errors.IsConflict))
 		})
 
-		It("should retry on persistent conflicts", func(ctx SpecContext) {
+		It("should retry on persistent conflicts", func(ctx context.Context) {
 			// Create a client that always returns conflicts
 			conflictingClient := &ConflictingClient{
 				Client:        client,
 				ConflictCount: -1,
 			}
 
-			original := tr.DeepCopy()
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
 			tr.Labels["persistent-conflict"] = "value"
 
-			err := PatchTaskRunWithRetry(ctx, conflictingClient, original, tr)
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, conflictingClient, tr)
 
 			Expect(err).To(HaveOccurred())
 			Expect(conflictingClient.CallCount()).To(BeNumerically(">", 3))
+		})
+
+		It("should panic if original task is not set in context", func(ctx context.Context) {
+			Expect(func() {
+				PatchTaskRunWithRetryFromContextOrPanic(ctx, client, tr)
+			}).To(
+				PanicWith("original TaskRun not found in context, that's likely to be a bug"))
+		})
+
+		It("should panic if original task is set to nil in context", func(ctx context.Context) {
+			var ntr *pipelinev1.TaskRun = nil
+
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, ntr)
+			Expect(func() {
+				PatchTaskRunWithRetryFromContextOrPanic(ctx, client, tr)
+			}).To(
+				PanicWith("original TaskRun not found in context, that's likely to be a bug"))
 		})
 	})
 })
@@ -1256,7 +1273,7 @@ type ConflictingClient struct {
 }
 
 func (c *ConflictingClient) CallCount() int {
-  return c.callCount
+	return c.callCount
 }
 
 func (c *ConflictingClient) Update(ctx context.Context, obj runtimeclient.Object, opts ...runtimeclient.UpdateOption) error {

@@ -87,6 +87,10 @@ const (
 	ParamSudoCommands      = "SUDO_COMMANDS"
 )
 
+type contextKey string
+
+var originalTaskRunContextKey contextKey = "original-task-run"
+
 var errFailedToDeterminePlatform = errors2.New("failed to determine platform")
 
 type ReconcileTaskRun struct {
@@ -125,6 +129,7 @@ func (r *ReconcileTaskRun) Reconcile(ctx context.Context, request reconcile.Requ
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, contextTimeout)
 	defer cancel()
+
 	log := ctrl.Log.WithName("taskrun").WithValues("request", request.NamespacedName)
 
 	tr := tektonapi.TaskRun{}
@@ -136,6 +141,7 @@ func (r *ReconcileTaskRun) Reconcile(ctx context.Context, request reconcile.Requ
 			return ctrl.Result{}, fmt.Errorf("failed to get a TaskRun: %w", err)
 		}
 	}
+	ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
 
 	if tr.Annotations != nil {
 		if tr.Annotations[CloudInstanceId] != "" {
@@ -147,10 +153,10 @@ func (r *ReconcileTaskRun) Reconcile(ctx context.Context, request reconcile.Requ
 	}
 	ctx = logr.NewContext(ctx, log)
 
-	return r.handleTaskRunReceived(ctx, tr.DeepCopy(), &tr)
+	return r.handleTaskRunReceived(ctx, &tr)
 }
 
-func (r *ReconcileTaskRun) handleTaskRunReceived(ctx context.Context, original, tr *tektonapi.TaskRun) (reconcile.Result, error) {
+func (r *ReconcileTaskRun) handleTaskRunReceived(ctx context.Context, tr *tektonapi.TaskRun) (reconcile.Result, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("taskrun", tr.Name, "namespace", tr.Namespace)
 
 	// Handle internal task types first
@@ -206,7 +212,7 @@ func (r *ReconcileTaskRun) handleTaskRunReceived(ctx context.Context, original, 
 	}
 
 	log.Info("Reconciling user task")
-	return r.handleUserTask(ctx, original, tr)
+	return r.handleUserTask(ctx, tr)
 }
 
 func (r *ReconcileTaskRun) handleCleanTask(ctx context.Context, tr *tektonapi.TaskRun) (reconcile.Result, error) {
@@ -420,7 +426,7 @@ func (r *ReconcileTaskRun) createErrorSecret(ctx context.Context, tr *tektonapi.
 	return nil
 }
 
-func (r *ReconcileTaskRun) handleUserTask(ctx context.Context, original, tr *tektonapi.TaskRun) (reconcile.Result, error) {
+func (r *ReconcileTaskRun) handleUserTask(ctx context.Context, tr *tektonapi.TaskRun) (reconcile.Result, error) {
 	log := logr.FromContextOrDiscard(ctx)
 	secretName := SecretPrefix + tr.Name
 	if tr.Labels != nil && tr.Labels[AssignedHost] != "" {
@@ -452,7 +458,7 @@ func (r *ReconcileTaskRun) handleUserTask(ctx context.Context, original, tr *tek
 		tr.Labels[TargetPlatformLabel] = platformLabel(targetPlatform)
 	}
 
-	res, err := r.handleHostAllocation(ctx, original, tr, secretName, targetPlatform)
+	res, err := r.handleHostAllocation(ctx, tr, secretName, targetPlatform)
 	if err != nil && !errors.IsConflict(err) {
 		mpcmetrics.HandleMetrics(targetPlatform, func(metrics *mpcmetrics.PlatformMetrics) {
 			metrics.HostAllocationFailures.Inc()
@@ -474,7 +480,7 @@ func extractPlatform(tr *tektonapi.TaskRun) (string, error) {
 	return "", errFailedToDeterminePlatform
 }
 
-func (r *ReconcileTaskRun) handleHostAllocation(ctx context.Context, original, tr *tektonapi.TaskRun, secretName string, targetPlatform string) (reconcile.Result, error) {
+func (r *ReconcileTaskRun) handleHostAllocation(ctx context.Context, tr *tektonapi.TaskRun, secretName string, targetPlatform string) (reconcile.Result, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("platform", targetPlatform, "secretName", secretName)
 	log.Info("attempting to allocate host")
 	//check the secret does not already exist
@@ -516,7 +522,7 @@ func (r *ReconcileTaskRun) handleHostAllocation(ctx context.Context, original, t
 		}
 	}
 
-	ret, err := hosts.Allocate(r, ctx, original, tr, secretName)
+	ret, err := hosts.Allocate(r, ctx, tr, secretName)
 	isWaiting := tr.Labels[WaitingForPlatformLabel] != ""
 
 	if err != nil {
@@ -894,7 +900,7 @@ func (r *ReconcileTaskRun) readConfiguration(ctx context.Context, targetPlatform
 }
 
 type PlatformConfig interface {
-	Allocate(r *ReconcileTaskRun, ctx context.Context, original, tr *tektonapi.TaskRun, secretName string) (reconcile.Result, error)
+	Allocate(r *ReconcileTaskRun, ctx context.Context, tr *tektonapi.TaskRun, secretName string) (reconcile.Result, error)
 	Deallocate(r *ReconcileTaskRun, ctx context.Context, tr *tektonapi.TaskRun, secretName string, selectedHost string) error
 }
 
@@ -972,9 +978,14 @@ func platformLabel(platform string) string {
 	return strings.ReplaceAll(platform, "/", "-")
 }
 
-// PatchTaskRunWithRetry performs a conflict-resilient update of a TaskRun object.
+// PatchTaskRunWithRetryFromContextOrPanic performs a conflict-resilient update of a TaskRun object.
 // On conflict, it fetches the latest version and merges labels, annotations, and finalizers from the incoming TaskRun.
-func PatchTaskRunWithRetry(ctx context.Context, cli client.Client, original, mutated *tektonapi.TaskRun) error {
+func PatchTaskRunWithRetryFromContextOrPanic(ctx context.Context, cli client.Client, mutated *tektonapi.TaskRun) error {
+	original, ok := ctx.Value(originalTaskRunContextKey).(*tektonapi.TaskRun)
+	if !ok || original == nil {
+		panic("original TaskRun not found in context, that's likely to be a bug")
+	}
+
 	// build the patch
 	patch := client.StrategicMergeFrom(original.DeepCopy())
 

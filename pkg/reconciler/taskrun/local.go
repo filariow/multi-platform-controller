@@ -14,7 +14,7 @@ import (
 
 type Local struct{}
 
-func (l Local) Allocate(r *ReconcileTaskRun, ctx context.Context, _, tr *pipelinev1.TaskRun, secretName string) (reconcile.Result, error) {
+func (l Local) Allocate(r *ReconcileTaskRun, ctx context.Context, tr *pipelinev1.TaskRun, secretName string) (reconcile.Result, error) {
 	var err error
 	log := logr.FromContextOrDiscard(ctx)
 

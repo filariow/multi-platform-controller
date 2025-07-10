@@ -101,7 +101,7 @@ func (a DynamicHostPool) isHostIdle(r *ReconcileTaskRun, ctx context.Context, se
 	return len(trs.Items) == 0, nil
 }
 
-func (a DynamicHostPool) Allocate(r *ReconcileTaskRun, ctx context.Context, original, tr *v1.TaskRun, secretName string) (reconcile.Result, error) {
+func (a DynamicHostPool) Allocate(r *ReconcileTaskRun, ctx context.Context, tr *v1.TaskRun, secretName string) (reconcile.Result, error) {
 
 	log := logr.FromContextOrDiscard(ctx)
 	hostPool, oldInstanceCount, err := a.buildHostPool(r, ctx, a.instanceTag)
@@ -109,7 +109,7 @@ func (a DynamicHostPool) Allocate(r *ReconcileTaskRun, ctx context.Context, orig
 		return reconcile.Result{}, err
 	}
 	if len(hostPool.hosts) > 0 {
-		_, err = hostPool.Allocate(r, ctx, original, tr, secretName)
+		_, err = hostPool.Allocate(r, ctx, tr, secretName)
 		if err != nil {
 			log.Error(err, "could not allocate host from pool")
 		}
