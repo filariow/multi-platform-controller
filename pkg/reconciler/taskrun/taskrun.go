@@ -23,7 +23,6 @@ import (
 	k8sRuntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/strings/slices"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -989,9 +988,6 @@ func PatchTaskRunWithRetryFromContextOrPanic(ctx context.Context, cli client.Cli
 	// build the patch
 	patch := client.StrategicMergeFrom(original.DeepCopy())
 
-	// retry until non-conflict error or timeout
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// apply the patch
-		return cli.Patch(ctx, mutated, patch)
-	})
+	// apply the patch
+	return cli.Patch(ctx, mutated, patch)
 }

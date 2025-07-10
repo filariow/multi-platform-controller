@@ -13,9 +13,9 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"knative.dev/pkg/apis"
@@ -37,7 +37,12 @@ func setupClientAndReconciler(objs []runtimeclient.Object) (runtimeclient.Client
 	_ = pipelinev1.AddToScheme(scheme)
 	_ = v1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		WithRESTMapper(meta.NewDefaultRESTMapper(
+			scheme.PreferredVersionAllGroups())).
+		Build()
 	reconciler := &ReconcileTaskRun{
 		apiReader:         client,
 		client:            client,
@@ -767,31 +772,44 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			Expect(updated.Annotations).To(HaveKeyWithValue("existing-annotation", "existing-value"))
 			Expect(updated.Finalizers).To(ContainElements("existing-finalizer", "new-finalizer"))
 		})
-
-		It("should handle conflict errors with retry and merge", func(ctx context.Context) {
+		//
+		It("should merge labels and annotations correctly after conflict", func(ctx context.Context) {
 			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
 
-			// Create a conflicting client that will cause conflicts
-			conflictingClient := &ConflictingClient{
-				Client:        client,
-				ConflictCount: 2, // Will fail twice, then succeed
-			}
+			// First, update the TaskRun externally to simulate concurrent modification
+			external := &pipelinev1.TaskRun{}
+			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, external)).To(Succeed())
+			external.Labels["local-label"] = "local-value-2"
+			external.Annotations["local-annotation"] = "local-value-2"
+			external.Finalizers = append(tr.Finalizers, "local-finalizer-2")
+			Expect(client.Update(ctx, external)).To(Succeed())
 
-			// Modify the TaskRun
-			tr.Labels["conflict-label"] = "conflict-value"
-			tr.Annotations["conflict-annotation"] = "conflict-value"
-			tr.Finalizers = append(tr.Finalizers, "conflict-finalizer")
+			// Verify changes are present
+			externalUpdated := &pipelinev1.TaskRun{}
+			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, externalUpdated)).To(Succeed())
+			Expect(externalUpdated.Labels).To(And(
+				HaveKeyWithValue("local-label", "local-value-2"),
+				HaveKeyWithValue("existing-label", "existing-value")))
 
-			// Should succeed after retries
-			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, conflictingClient, tr)
+			// Now modify our local copy with different changes
+			tr.Labels["local-label"] = "local-value"
+			tr.Annotations["local-annotation"] = "local-value"
+			tr.Finalizers = append(tr.Finalizers, "local-finalizer")
+
+			// Update should succeed and merge both changes
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, client, tr)
 			Expect(err).ToNot(HaveOccurred())
 
-			// Verify the update was applied
+			// Verify both sets of changes are present
 			updated := &pipelinev1.TaskRun{}
 			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, updated)).To(Succeed())
-			Expect(updated.Labels).To(HaveKeyWithValue("conflict-label", "conflict-value"))
-			Expect(updated.Annotations).To(HaveKeyWithValue("conflict-annotation", "conflict-value"))
-			Expect(updated.Finalizers).To(ContainElement("conflict-finalizer"))
+			Expect(updated.Labels).To(And(
+				HaveKeyWithValue("local-label", "local-value"),
+				HaveKeyWithValue("existing-label", "existing-value")))
+			Expect(updated.Annotations).To(And(
+				HaveKeyWithValue("local-annotation", "local-value"),
+				HaveKeyWithValue("existing-annotation", "existing-value")))
+			Expect(updated.Finalizers).To(ContainElements("existing-finalizer", "local-finalizer"))
 		})
 
 		It("should merge labels and annotations correctly after conflict", func(ctx context.Context) {
@@ -805,19 +823,13 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			external.Finalizers = append(external.Finalizers, "external-finalizer")
 			Expect(client.Update(ctx, external)).To(Succeed())
 
-			// Create a client that will cause one conflict
-			conflictingClient := &ConflictingClient{
-				Client:        client,
-				ConflictCount: 1,
-			}
-
 			// Now modify our local copy with different changes
 			tr.Labels["local-label"] = "local-value"
 			tr.Annotations["local-annotation"] = "local-value"
 			tr.Finalizers = append(tr.Finalizers, "local-finalizer")
 
 			// Update should succeed and merge both changes
-			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, conflictingClient, tr)
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, client, tr)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Verify both sets of changes are present
@@ -832,6 +844,76 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			Expect(updated.Finalizers).To(ContainElements("existing-finalizer", "local-finalizer", "external-finalizer"))
 		})
 
+		It("should not fail if same fields were already added", func(ctx context.Context) {
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
+
+			// First, a controller removed its annotations, labels, and finalizers
+			external := &pipelinev1.TaskRun{}
+			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, external)).To(Succeed())
+			external.Labels["local-label"] = "local-value"
+			external.Annotations["local-annotation"] = "local-value"
+			external.Finalizers = append(tr.Finalizers, "local-finalizer")
+			Expect(client.Update(ctx, external)).To(Succeed())
+
+			// Verify both sets of changes are present
+			updatedExternal := &pipelinev1.TaskRun{}
+			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, updatedExternal)).To(Succeed())
+			Expect(updatedExternal.Labels).To(And(
+				HaveKeyWithValue("local-label", "local-value"),
+				HaveKeyWithValue("existing-label", "existing-value")))
+			Expect(updatedExternal.Annotations).To(And(
+				HaveKeyWithValue("local-annotation", "local-value"),
+				HaveKeyWithValue("existing-annotation", "existing-value")))
+
+			// modify our local copy with different changes
+			tr.Labels["local-label"] = "local-value"
+			tr.Annotations["local-annotation"] = "local-value"
+			tr.Finalizers = append(tr.Finalizers, "local-finalizer")
+
+			// Update should succeed and merge both changes
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, client, tr)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Verify both sets of changes are present
+			updated := &pipelinev1.TaskRun{}
+			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, updated)).To(Succeed())
+			Expect(updated.Labels).To(And(
+				HaveKeyWithValue("local-label", "local-value"),
+				HaveKeyWithValue("existing-label", "existing-value")))
+			Expect(updated.Annotations).To(And(
+				HaveKeyWithValue("local-annotation", "local-value"),
+				HaveKeyWithValue("existing-annotation", "existing-value")))
+			Expect(updated.Finalizers).To(ContainElements("existing-finalizer", "local-finalizer"))
+		})
+
+		It("should not fail if same fields were already added", func(ctx context.Context) {
+			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
+
+			// First, a controller removed its annotations, labels, and finalizers
+			external := &pipelinev1.TaskRun{}
+			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, external)).To(Succeed())
+			delete(external.Labels, "existing-label")
+			delete(external.Annotations, "existing-annotation")
+			external.Finalizers = []string{}
+			Expect(client.Update(ctx, external)).To(Succeed())
+
+			// modify our local copy with different changes
+			delete(tr.Labels, "existing-label")
+			delete(tr.Annotations, "existing-annotation")
+			tr.Finalizers = []string{}
+
+			// Update should succeed and merge both changes
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, client, tr)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Verify both sets of changes are present
+			updated := &pipelinev1.TaskRun{}
+			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, updated)).To(Succeed())
+			Expect(updated.Labels).To(BeEmpty())
+			Expect(updated.Annotations).To(BeEmpty())
+			Expect(updated.Finalizers).To(BeEmpty())
+		})
+
 		It("should not reintroduce fields removed from concurrent updates", func(ctx context.Context) {
 			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
 
@@ -843,19 +925,13 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			external.Finalizers = []string{}
 			Expect(client.Update(ctx, external)).To(Succeed())
 
-			// Create a client that will cause one conflict
-			conflictingClient := &ConflictingClient{
-				Client:        client,
-				ConflictCount: 1,
-			}
-
 			// modify our local copy with different changes
 			tr.Labels["local-label"] = "local-value"
 			tr.Annotations["local-annotation"] = "local-value"
 			tr.Finalizers = append(tr.Finalizers, "local-finalizer")
 
 			// Update should succeed and merge both changes
-			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, conflictingClient, tr)
+			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, client, tr)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Verify both sets of changes are present
@@ -917,22 +993,6 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, errorClient, tr)
 			Expect(err).To(HaveOccurred())
 			Expect(err).ToNot(Satisfy(errors.IsConflict))
-		})
-
-		It("should retry on persistent conflicts", func(ctx context.Context) {
-			// Create a client that always returns conflicts
-			conflictingClient := &ConflictingClient{
-				Client:        client,
-				ConflictCount: -1,
-			}
-
-			ctx = context.WithValue(ctx, originalTaskRunContextKey, tr.DeepCopy())
-			tr.Labels["persistent-conflict"] = "value"
-
-			err := PatchTaskRunWithRetryFromContextOrPanic(ctx, conflictingClient, tr)
-
-			Expect(err).To(HaveOccurred())
-			Expect(conflictingClient.CallCount()).To(BeNumerically(">", 3))
 		})
 
 		It("should panic if original task is not set in context", func(ctx context.Context) {
@@ -1263,58 +1323,4 @@ func (m *MockCloud) CleanUpVms(ctx context.Context, kubeClient runtimeclient.Cli
 
 func MockCloudSetup(platform string, data map[string]string, systemnamespace string) cloud.CloudProvider {
 	return &cloudImpl
-}
-
-// ConflictingClient simulates conflict errors for testing
-type ConflictingClient struct {
-	runtimeclient.Client
-	ConflictCount int
-	callCount     int
-}
-
-func (c *ConflictingClient) CallCount() int {
-	return c.callCount
-}
-
-func (c *ConflictingClient) Update(ctx context.Context, obj runtimeclient.Object, opts ...runtimeclient.UpdateOption) error {
-	if err := c.errorIfStillConflicting(obj); err != nil {
-		return err
-	}
-	return c.Client.Update(ctx, obj, opts...)
-}
-
-func (c *ConflictingClient) Patch(ctx context.Context, obj runtimeclient.Object, patch runtimeclient.Patch, opts ...runtimeclient.PatchOption) error {
-	if err := c.errorIfStillConflicting(obj); err != nil {
-		return err
-	}
-	return c.Client.Patch(ctx, obj, patch, opts...)
-}
-
-func (c *ConflictingClient) errorIfStillConflicting(obj runtimeclient.Object) error {
-	c.callCount++
-
-	if c.ConflictCount != -1 && c.callCount > c.ConflictCount {
-		return nil
-	}
-
-	return c.buildConflictError(obj)
-}
-
-func (c *ConflictingClient) buildConflictError(obj runtimeclient.Object) error {
-	gvk, ok, err := c.Client.Scheme().ObjectKinds(obj)
-	if err != nil || !ok || len(gvk) == 0 {
-		return c.conflictErrorForUnknwonResource(obj)
-	}
-
-	mp, err := c.RESTMapper().RESTMapping(gvk[0].GroupKind())
-	if err != nil {
-		return c.conflictErrorForUnknwonResource(obj)
-	}
-
-	gr := mp.Resource.GroupResource()
-	return errors.NewConflict(gr, obj.GetName(), fmt.Errorf("conflict"))
-}
-
-func (c *ConflictingClient) conflictErrorForUnknwonResource(obj runtimeclient.Object) error {
-	return errors.NewConflict(schema.GroupResource{Group: "unknown", Resource: "unknown"}, obj.GetName(), fmt.Errorf("conflict"))
 }
