@@ -771,7 +771,6 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 		It("should handle conflict errors with retry and merge", func(ctx SpecContext) {
 			original := tr.DeepCopy()
 
-			// TODO(@filariow): this is now using patch, fix it
 			// Create a conflicting client that will cause conflicts
 			conflictingClient := &ConflictingClient{
 				Client:        client,
@@ -806,7 +805,6 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			external.Finalizers = append(external.Finalizers, "external-finalizer")
 			Expect(client.Update(ctx, external)).To(Succeed())
 
-			// TODO(@filariow): this is now using patch, fix it
 			// Create a client that will cause one conflict
 			conflictingClient := &ConflictingClient{
 				Client:        client,
