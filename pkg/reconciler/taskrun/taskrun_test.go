@@ -766,10 +766,12 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			// Verify the update was applied
 			updated := &pipelinev1.TaskRun{}
 			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, updated)).To(Succeed())
-			Expect(updated.Labels).To(HaveKeyWithValue("new-label", "new-value"))
-			Expect(updated.Labels).To(HaveKeyWithValue("existing-label", "existing-value"))
-			Expect(updated.Annotations).To(HaveKeyWithValue("new-annotation", "new-value"))
-			Expect(updated.Annotations).To(HaveKeyWithValue("existing-annotation", "existing-value"))
+			Expect(updated.Labels).To(And(
+				HaveKeyWithValue("new-label", "new-value"),
+				HaveKeyWithValue("existing-label", "existing-value")))
+			Expect(updated.Annotations).To(And(
+				HaveKeyWithValue("new-annotation", "new-value"),
+				HaveKeyWithValue("existing-annotation", "existing-value")))
 			Expect(updated.Finalizers).To(ContainElements("existing-finalizer", "new-finalizer"))
 		})
 		//
@@ -835,12 +837,14 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 			// Verify both sets of changes are present
 			updated := &pipelinev1.TaskRun{}
 			Expect(client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: tr.Name}, updated)).To(Succeed())
-			Expect(updated.Labels).To(HaveKeyWithValue("local-label", "local-value"))
-			Expect(updated.Labels).To(HaveKeyWithValue("external-label", "external-value"))
-			Expect(updated.Labels).To(HaveKeyWithValue("existing-label", "existing-value"))
-			Expect(updated.Annotations).To(HaveKeyWithValue("local-annotation", "local-value"))
-			Expect(updated.Annotations).To(HaveKeyWithValue("external-annotation", "external-value"))
-			Expect(updated.Annotations).To(HaveKeyWithValue("existing-annotation", "existing-value"))
+			Expect(updated.Labels).To(And(
+				HaveKeyWithValue("local-label", "local-value"),
+				HaveKeyWithValue("external-label", "external-value"),
+				HaveKeyWithValue("existing-label", "existing-value")))
+			Expect(updated.Annotations).To(And(
+				HaveKeyWithValue("local-annotation", "local-value"),
+				HaveKeyWithValue("external-annotation", "external-value"),
+				HaveKeyWithValue("existing-annotation", "existing-value")))
 			Expect(updated.Finalizers).To(ContainElements("existing-finalizer", "local-finalizer", "external-finalizer"))
 		})
 
