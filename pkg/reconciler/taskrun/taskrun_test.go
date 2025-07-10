@@ -928,13 +928,13 @@ var _ = Describe("TaskRun Reconciler Tests", func() {
 				ConflictCount: -1,
 			}
 
-      original := tr.DeepCopy()
-      tr.Labels["persistent-conflict"] = "value"
+			original := tr.DeepCopy()
+			tr.Labels["persistent-conflict"] = "value"
 
 			err := PatchTaskRunWithRetry(ctx, conflictingClient, original, tr)
 
 			Expect(err).To(HaveOccurred())
-      Expect(conflictingClient.CallCount).To(BeNumerically(">", 3))
+			Expect(conflictingClient.CallCount()).To(BeNumerically(">", 3))
 		})
 	})
 })
@@ -1254,28 +1254,52 @@ func MockCloudSetup(platform string, data map[string]string, systemnamespace str
 type ConflictingClient struct {
 	runtimeclient.Client
 	ConflictCount int
-	CallCount     int
+	callCount     int
+}
+
+func (c *ConflictingClient) CallCount() int {
+  return c.callCount
 }
 
 func (c *ConflictingClient) Update(ctx context.Context, obj runtimeclient.Object, opts ...runtimeclient.UpdateOption) error {
-	if err := c.errorIfStillConflicting(); err != nil {
+	if err := c.errorIfStillConflicting(obj); err != nil {
 		return err
 	}
 	return c.Client.Update(ctx, obj, opts...)
 }
 
 func (c *ConflictingClient) Patch(ctx context.Context, obj runtimeclient.Object, patch runtimeclient.Patch, opts ...runtimeclient.PatchOption) error {
-	if err := c.errorIfStillConflicting(); err != nil {
+	if err := c.errorIfStillConflicting(obj); err != nil {
 		return err
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
-func (c *ConflictingClient) errorIfStillConflicting() error {
-	c.CallCount++
-	if c.ConflictCount == -1 || c.CallCount <= c.ConflictCount {
-		// hardcoded gvk is not perfect but i dunno how to avoid that :(
-		return errors.NewConflict(schema.GroupResource{Group: "tekton.dev", Resource: "taskruns"}, "test", fmt.Errorf("conflict"))
+func (c *ConflictingClient) errorIfStillConflicting(obj runtimeclient.Object) error {
+	c.callCount++
+
+	if c.ConflictCount != -1 && c.callCount > c.ConflictCount {
+		return nil
 	}
-	return nil
+
+	return c.buildConflictError(obj)
+}
+
+func (c *ConflictingClient) buildConflictError(obj runtimeclient.Object) error {
+	gvk, ok, err := c.Client.Scheme().ObjectKinds(obj)
+	if err != nil || !ok || len(gvk) == 0 {
+		return c.conflictErrorForUnknwonResource(obj)
+	}
+
+	mp, err := c.RESTMapper().RESTMapping(gvk[0].GroupKind())
+	if err != nil {
+		return c.conflictErrorForUnknwonResource(obj)
+	}
+
+	gr := mp.Resource.GroupResource()
+	return errors.NewConflict(gr, obj.GetName(), fmt.Errorf("conflict"))
+}
+
+func (c *ConflictingClient) conflictErrorForUnknwonResource(obj runtimeclient.Object) error {
+	return errors.NewConflict(schema.GroupResource{Group: "unknown", Resource: "unknown"}, obj.GetName(), fmt.Errorf("conflict"))
 }

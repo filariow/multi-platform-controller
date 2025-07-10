@@ -978,7 +978,7 @@ func PatchTaskRunWithRetry(ctx context.Context, cli client.Client, original, mut
 	// build the patch
 	patch := client.StrategicMergeFrom(original.DeepCopy())
 
-  // retry until non-conflict error or timeout
+	// retry until non-conflict error or timeout
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// apply the patch
 		return cli.Patch(ctx, mutated, patch)
