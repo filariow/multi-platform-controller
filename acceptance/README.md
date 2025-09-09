@@ -2,7 +2,7 @@
 
 ## Required Tools
 
-* chainsaw
+* [Kyverno Chainsaw](https://kyverno.github.io/chainsaw/latest/)
 * docker
 * kind
 * kustomize
