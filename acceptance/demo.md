@@ -122,14 +122,14 @@ Steps
 ===
 <!-- font_size: 3 -->
 
-The scenario we discussed was simplified for demo purposes and made use of only two steps, `apply` and `assert`.
+The scenario we discussed was simplified for demo purposes. It only relies on the two steps `apply` and `assert`.
 
-Chainsaw provides several [operations](https://kyverno.github.io/chainsaw/latest/operations/), among the generic **Command** one.
+Chainsaw provides several [operations](https://kyverno.github.io/chainsaw/latest/operations/), among which the generic **Command** one.
 
 
 <!-- end_slide -->
 
-Among adopters
+Adopters
 ===
 <!-- font_size: 3 -->
 
@@ -162,8 +162,6 @@ Conclusions
     * Easier to avoid trying to implement overly complex tests
 
 <!-- new_lines: 1 -->
-
-* **Easy to reuse** if we make breaking changes to MPC
 
 <!-- column: 1 -->
 
