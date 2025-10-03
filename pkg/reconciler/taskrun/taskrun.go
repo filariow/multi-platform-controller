@@ -11,6 +11,7 @@ import (
 
 	"knative.dev/pkg/kmeta"
 
+	"github.com/konflux-ci/multi-platform-controller/pkg/crd"
 	mpcmetrics "github.com/konflux-ci/multi-platform-controller/pkg/metrics"
 
 	"github.com/konflux-ci/multi-platform-controller/pkg/aws"
@@ -36,7 +37,7 @@ import (
 )
 
 const (
-	//TODO eventually we'll need to decide if we want to make this tuneable
+	// TODO eventually we'll need to decide if we want to make this tuneable
 	contextTimeout = 300 * time.Second
 
 	SecretPrefix   = "multi-platform-ssh-"
@@ -53,9 +54,9 @@ const (
 	ProvisionTaskProcessed = "build.appstudio.redhat.com/provision-task-processed"
 	// ProvisionTaskFinalizer = "build.appstudio.redhat.com/provision-task-finalizer"
 
-	//AllocationStartTimeAnnotation Some allocations can take multiple calls, we track the actual start time in this annotation
+	// AllocationStartTimeAnnotation Some allocations can take multiple calls, we track the actual start time in this annotation
 	AllocationStartTimeAnnotation = "build.appstudio.redhat.com/allocation-start-time"
-	//BuildStartTimeAnnotation The time the build actually starts
+	// BuildStartTimeAnnotation The time the build actually starts
 	BuildStartTimeAnnotation = "build.appstudio.redhat.com/build-start-time"
 
 	UserTaskName      = "build.appstudio.redhat.com/user-task-name"
@@ -116,7 +117,7 @@ func newReconciler(mgr ctrl.Manager, operatorNamespace string) reconcile.Reconci
 		eventRecorder:     mgr.GetEventRecorderFor("MultiPlatformTaskRun"),
 		operatorNamespace: operatorNamespace,
 		platformConfig:    map[string]PlatformConfig{},
-		cloudProviders:    map[string]func(platform string, config map[string]string, systemNamespace string) cloud.CloudProvider{"aws": aws.CreateEc2CloudConfig, "ibmz": ibm.CreateIbmZCloudConfig, "ibmp": ibm.CreateIBMPowerCloudConfig},
+		cloudProviders:    map[string]func(platform string, config map[string]string, systemNamespace string) cloud.CloudProvider{"aws": aws.CreateEc2CloudConfig, "ibmz": ibm.CreateIbmZCloudConfig, "ibmp": ibm.CreateIBMPowerCloudConfig, "crd": crd.CreateCRDProvider},
 	}
 }
 
@@ -227,7 +228,7 @@ func (r *ReconcileTaskRun) handleCleanTask(ctx context.Context, tr *tektonapi.Ta
 			})
 		}
 	}
-	//leave the failed TR for an hour to view logs
+	// leave the failed TR for an hour to view logs
 	if success || tr.Status.CompletionTime.Add(time.Hour).Before(time.Now()) {
 		return reconcile.Result{}, r.client.Delete(ctx, tr)
 	}
@@ -290,8 +291,8 @@ func (r *ReconcileTaskRun) handleProvisionTask(ctx context.Context, tr *tektonap
 				if userTr.Annotations == nil {
 					userTr.Annotations = map[string]string{}
 				}
-				//add to failed hosts and remove assigned
-				//this will cause it to try again
+				// add to failed hosts and remove assigned
+				// this will cause it to try again
 				failed := strings.Split(userTr.Annotations[FailedHosts], ",")
 				if failed[0] == "" {
 					failed = []string{}
@@ -315,7 +316,7 @@ func (r *ReconcileTaskRun) handleProvisionTask(ctx context.Context, tr *tektonap
 		log.Info(message)
 		r.eventRecorder.Event(tr, "Normal", "Provisioned", message)
 		mpcmetrics.CountAvailabilitySuccess(targetPlatform)
-		//verify we ended up with a secret
+		// verify we ended up with a secret
 		secret := kubecore.Secret{}
 		err := r.client.Get(ctx, types.NamespacedName{Namespace: userNamespace, Name: secretName}, &secret)
 		if err != nil {
@@ -324,7 +325,7 @@ func (r *ReconcileTaskRun) handleProvisionTask(ctx context.Context, tr *tektonap
 				err = r.client.Get(ctx, types.NamespacedName{Namespace: userNamespace, Name: userTaskName}, &userTr)
 				if err != nil {
 					if !k8serrors.IsNotFound(err) {
-						//if the task run is not found then this is just old
+						// if the task run is not found then this is just old
 						return reconcile.Result{}, err
 					}
 				} else {
@@ -348,7 +349,7 @@ func (r *ReconcileTaskRun) handleProvisionTask(ctx context.Context, tr *tektonap
 		} else {
 			for i := range pods.Items {
 				pod := pods.Items[i]
-				//look for pods owned by the user taskrun
+				// look for pods owned by the user taskrun
 				owned := false
 				for _, ref := range pod.OwnerReferences {
 					if ref.Name == userTaskName {
@@ -422,7 +423,7 @@ func (r *ReconcileTaskRun) createErrorSecret(ctx context.Context, tr *tektonapi.
 	err = r.client.Create(ctx, &secret)
 	if err != nil {
 		if k8serrors.IsAlreadyExists(err) {
-			//already exists, ignore
+			// already exists, ignore
 			return nil
 		}
 		return err
@@ -436,7 +437,7 @@ func (r *ReconcileTaskRun) handleUserTask(ctx context.Context, tr *tektonapi.Tas
 	if tr.Labels != nil && tr.Labels[AssignedHost] != "" {
 		return r.handleHostAssigned(ctx, tr, secretName)
 	}
-	//if the TR is done we ignore it
+	// if the TR is done we ignore it
 	if tr.Status.CompletionTime != nil || tr.GetDeletionTimestamp() != nil {
 		if controllerutil.ContainsFinalizer(tr, PipelineFinalizer) {
 			return r.handleHostAssigned(ctx, tr, secretName)
@@ -478,7 +479,7 @@ func (r *ReconcileTaskRun) handleUserTask(ctx context.Context, tr *tektonapi.Tas
 func (r *ReconcileTaskRun) handleHostAllocation(ctx context.Context, tr *tektonapi.TaskRun, secretName string, targetPlatform string) (reconcile.Result, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("platform", targetPlatform, "secretName", secretName)
 	log.Info("attempting to allocate host")
-	//check the secret does not already exist
+	// check the secret does not already exist
 	secret := kubecore.Secret{}
 	err := r.client.Get(ctx, types.NamespacedName{Namespace: tr.Namespace, Name: secretName}, &secret)
 	if err != nil {
@@ -490,7 +491,7 @@ func (r *ReconcileTaskRun) handleHostAllocation(ctx context.Context, tr *tektona
 		return reconcile.Result{}, nil
 	}
 
-	//let's allocate a host, get the map with host info
+	// let's allocate a host, get the map with host info
 	hosts, err := r.readConfiguration(ctx, targetPlatform, tr.Namespace)
 	if err != nil {
 		log.Error(err, "failed to read host config")
@@ -668,7 +669,7 @@ func (r *ReconcileTaskRun) handleWaitingTasks(ctx context.Context, platform stri
 	log := logr.FromContextOrDiscard(ctx).WithValues("platform", platform)
 	log.Info("checking for waiting tasks to requeue")
 
-	//try and requeue a waiting task if one exists
+	// try and requeue a waiting task if one exists
 	taskList := tektonapi.TaskRunList{}
 
 	err := r.client.List(ctx, &taskList, client.MatchingLabels{WaitingForPlatformLabel: platformLabel(platform)})
@@ -693,7 +694,7 @@ func (r *ReconcileTaskRun) handleWaitingTasks(ctx context.Context, platform stri
 	if oldest == nil {
 		return reconcile.Result{}, nil
 	}
-	//add the "finished-waiting" label, which will trigger a requeue
+	// add the "finished-waiting" label, which will trigger a requeue
 	oldest.Labels[FinishedWaitingLabel] = "true"
 
 	// Update the task
@@ -714,8 +715,8 @@ func (r *ReconcileTaskRun) readConfiguration(ctx context.Context, targetPlatform
 	}
 	log := logr.FromContextOrDiscard(ctx)
 	if r.configMapResourceVersion != cm.ResourceVersion {
-		//if the config map has changes then dump the cached config
-		//metrics are fine, as they don't depend on the config anyway
+		// if the config map has changes then dump the cached config
+		// metrics are fine, as they don't depend on the config anyway
 		r.configMapResourceVersion = cm.ResourceVersion
 		r.platformConfig = map[string]PlatformConfig{}
 	}
@@ -768,7 +769,7 @@ func (r *ReconcileTaskRun) readConfiguration(ctx context.Context, targetPlatform
 					instanceTag = cm.Data[DefaultInstanceTag]
 				}
 				timeoutSeconds := cm.Data["dynamic."+platformConfigName+".allocation-timeout"]
-				timeout := int64(600) //default to 10 minutes
+				timeout := int64(600) // default to 10 minutes
 				if timeoutSeconds != "" {
 					timeoutInt, err := strconv.Atoi(timeoutSeconds)
 					if err != nil {
@@ -903,10 +904,10 @@ type PlatformConfig interface {
 }
 
 func launchProvisioningTask(r *ReconcileTaskRun, ctx context.Context, tr *tektonapi.TaskRun, secretName string, sshSecret string, address string, user string, platform string, sudoCommands string) error {
-	//kick off the provisioning task
-	//note that we can't use owner refs here because this task runs in a different namespace
+	// kick off the provisioning task
+	// note that we can't use owner refs here because this task runs in a different namespace
 
-	//first verify the secret exists, so we don't hang if it is missing
+	// first verify the secret exists, so we don't hang if it is missing
 	log := logr.FromContextOrDiscard(ctx)
 	secret := kubecore.Secret{}
 	err := r.client.Get(ctx, types.NamespacedName{Namespace: r.operatorNamespace, Name: sshSecret}, &secret)
@@ -925,7 +926,7 @@ func launchProvisioningTask(r *ReconcileTaskRun, ctx context.Context, tr *tekton
 	computeRequests := map[kubecore.ResourceName]resource.Quantity{kubecore.ResourceCPU: resource.MustParse("100m"), kubecore.ResourceMemory: resource.MustParse("256Mi")}
 	computeLimits := map[kubecore.ResourceName]resource.Quantity{kubecore.ResourceCPU: resource.MustParse("100m"), kubecore.ResourceMemory: resource.MustParse("512Mi")}
 	provision.Spec.ComputeResources = &kubecore.ResourceRequirements{Requests: computeRequests, Limits: computeLimits}
-	provision.Spec.ServiceAccountName = ServiceAccountName //TODO: special service account for this
+	provision.Spec.ServiceAccountName = ServiceAccountName // TODO: special service account for this
 
 	provision.Spec.Params = []tektonapi.Param{
 		{
