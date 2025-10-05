@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/konflux-ci/multi-platform-controller/pkg/cloud"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -45,14 +46,27 @@ func (p *CRDProvider) GetInstanceAddress(cli client.Client, ctx context.Context,
 	if err != nil {
 		return "", fmt.Errorf("invalid TaskRun ID: %w", err)
 	}
-	ss := v1.SecretList{}
+	idSplit := strings.Split(string(instanceId), ":")
+	ns, tr := idSplit[0], idSplit[1]
+	ss := corev1.SecretList{}
 	if err := cli.List(ctx, &ss,
-		client.InNamespace(p.SystemNamespace),
+		client.InNamespace(ns),
 	); err != nil || len(ss.Items) == 0 {
 		return "", nil
 	}
+
+	pp := corev1.PodList{}
+	if err := cli.List(ctx, &pp,
+		client.InNamespace(ns),
+		client.MatchingLabels{
+			"tekton.dev/taskRun": tr,
+		}); err != nil || len(pp.Items) == 0 {
+		return "", nil
+	}
+
+	po := pp.Items[0]
 	for _, s := range ss.Items {
-		if v, ok := s.GetAnnotations()["mpc.konflux-ci.dev/instance-id"]; ok && v == string(instanceId) {
+		if v, ok := s.GetAnnotations()["mpc.konflux-ci.dev/pod-name"]; ok && v == po.GetName() {
 			return string(s.Data["address"]), nil
 		}
 	}
