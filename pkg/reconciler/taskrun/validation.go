@@ -30,7 +30,7 @@ func validatePlatformFormat(platform string) error {
 
 	// Validate platform format: must be "label/label" where each label follows RFC 1035
 	parts := strings.Split(platform, "/")
-	if len(parts) != 2 {
+	if len(parts) > 2 {
 		return errInvalidPlatformFormat
 	}
 

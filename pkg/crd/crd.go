@@ -48,14 +48,16 @@ func (p *CRDProvider) GetInstanceAddress(cli client.Client, ctx context.Context,
 	ss := v1.SecretList{}
 	if err := cli.List(ctx, &ss,
 		client.InNamespace(p.SystemNamespace),
-		client.MatchingLabels{
-			"mpc.konflux-ci.dev/instance-id": string(instanceId),
-		}); err != nil || len(ss.Items) == 0 {
+	); err != nil || len(ss.Items) == 0 {
 		return "", nil
 	}
+	for _, s := range ss.Items {
+		if v, ok := s.GetAnnotations()["mpc.konflux-ci.dev/instance-id"]; ok && v == string(instanceId) {
+			return string(s.Data["address"]), nil
+		}
+	}
 
-	s := ss.Items[0]
-	return string(s.Data["address"]), nil
+	return "", nil
 }
 
 func (p *CRDProvider) CountInstances(kubeClient client.Client, ctx context.Context, instanceTag string) (int, error) {
