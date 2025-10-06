@@ -34,7 +34,9 @@ func (p *CRDProvider) LaunchInstance(kubeClient client.Client, ctx context.Conte
 	if err != nil {
 		return "", fmt.Errorf("invalid TaskRun ID: %w", err)
 	}
-	return cloud.InstanceIdentifier(taskRunID), nil
+
+	id := strings.ReplaceAll(taskRunID, ":", "_")
+	return cloud.InstanceIdentifier(id), nil
 }
 
 func (p *CRDProvider) TerminateInstance(kubeClient client.Client, ctx context.Context, instance cloud.InstanceIdentifier) error {
@@ -44,12 +46,13 @@ func (p *CRDProvider) TerminateInstance(kubeClient client.Client, ctx context.Co
 
 // GetInstanceAddress this only returns an error if it is a permanent error and the host will not ever be available
 func (p *CRDProvider) GetInstanceAddress(cli client.Client, ctx context.Context, instanceId cloud.InstanceIdentifier) (string, error) {
-	err := cloud.ValidateTaskRunID(string(instanceId))
+	trid := strings.ReplaceAll(string(instanceId), "_", ":")
+	err := cloud.ValidateTaskRunID(trid)
 	if err != nil {
 		return "", fmt.Errorf("invalid TaskRun ID: %w", err)
 	}
 
-	idSplit := strings.Split(string(instanceId), ":")
+	idSplit := strings.Split(string(instanceId), "_")
 	ns, tr := idSplit[0], idSplit[1]
 	l := log.FromContext(ctx, "instance-id", instanceId)
 	l.Info("get instance address")
@@ -83,5 +86,5 @@ func (p *CRDProvider) CleanUpVms(ctx context.Context, kubeClient client.Client, 
 }
 
 func (p *CRDProvider) SshUser() string {
-	panic("crd-user")
+	return "crd-user"
 }
