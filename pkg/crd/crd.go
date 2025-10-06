@@ -8,7 +8,9 @@ import (
 
 	"github.com/konflux-ci/multi-platform-controller/pkg/cloud"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type CRDProvider struct {
@@ -46,32 +48,20 @@ func (p *CRDProvider) GetInstanceAddress(cli client.Client, ctx context.Context,
 	if err != nil {
 		return "", fmt.Errorf("invalid TaskRun ID: %w", err)
 	}
+
 	idSplit := strings.Split(string(instanceId), ":")
 	ns, tr := idSplit[0], idSplit[1]
-	ss := corev1.SecretList{}
-	if err := cli.List(ctx, &ss,
-		client.InNamespace(ns),
-	); err != nil || len(ss.Items) == 0 {
+	l := log.FromContext(ctx, "instance-id", instanceId)
+	l.Info("get instance address")
+
+	s := corev1.Secret{}
+	k := types.NamespacedName{Namespace: ns, Name: tr + "-pod"}
+	if err := cli.Get(ctx, k, &s); err != nil {
+		l.Error(err, "error retrieving secret", "key", k)
 		return "", nil
 	}
 
-	pp := corev1.PodList{}
-	if err := cli.List(ctx, &pp,
-		client.InNamespace(ns),
-		client.MatchingLabels{
-			"tekton.dev/taskRun": tr,
-		}); err != nil || len(pp.Items) == 0 {
-		return "", nil
-	}
-
-	po := pp.Items[0]
-	for _, s := range ss.Items {
-		if v, ok := s.GetAnnotations()["mpc.konflux-ci.dev/pod-name"]; ok && v == po.GetName() {
-			return string(s.Data["address"]), nil
-		}
-	}
-
-	return "", nil
+	return string(s.Data["address"]), nil
 }
 
 func (p *CRDProvider) CountInstances(kubeClient client.Client, ctx context.Context, instanceTag string) (int, error) {
