@@ -95,7 +95,7 @@ spec:
         
         if [ -e "/tls/tls.crt" ]; then
           KEY=$(cat id_rsa)
-          OTP=$(curl --cacert /tls/tls.crt -XPOST -d "$KEY" https://multi-platform-otp-server.multi-platform-controller.svc.cluster.local/store-key | base64 -w 0)
+          OTP=$(curl -k --cacert /tls/tls.crt -XPOST -d "$KEY" https://multi-platform-otp-server.multi-platform-controller.svc.cluster.local/store-key | base64 -w 0)
           OTP_SERVER="$(echo https://multi-platform-otp-server.multi-platform-controller.svc.cluster.local/otp | base64 -w 0)"
           echo $OTP | base64 -d
           cat >secret.yaml <<EOF
