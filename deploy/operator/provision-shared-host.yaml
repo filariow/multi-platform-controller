@@ -77,7 +77,7 @@ spec:
         sudo su $USERNAME -c 'mkdir /home/$USERNAME/build'
         sudo mv $USERNAME.pub /home/$USERNAME/.ssh/authorized_keys
         sudo chown $USERNAME /home/$USERNAME/.ssh/authorized_keys
-        sudo restorecon -FRvv /home/$USERNAME/.ssh
+        # sudo restorecon -FRvv /home/$USERNAME/.ssh
         EOF
         
         if [ ! -z "$SUDO_COMMANDS" ]; then
