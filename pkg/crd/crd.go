@@ -86,5 +86,5 @@ func (p *CRDProvider) CleanUpVms(ctx context.Context, kubeClient client.Client, 
 }
 
 func (p *CRDProvider) SshUser() string {
-	return "crd-user"
+	return "user"
 }
