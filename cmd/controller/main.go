@@ -27,9 +27,7 @@ import (
 	"github.com/go-logr/logr"
 )
 
-var (
-	mainLog logr.Logger
-)
+var mainLog logr.Logger
 
 func main() {
 	var metricsAddr string
@@ -44,7 +42,7 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&abAPIExportName, "api-export-name", "jvm-build-service", "The name of the jvm-build-service APIExport.")
 
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.IntVar(&concurrentReconciles, "concurrent-reconciles", 10, "The concurrency level for reconciling resources.")
