@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"net"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,6 +21,8 @@ import (
 	types2 "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+var errNoInstancesCreated = errors.New("no EC2 instances were created")
 
 // pingIPAddress tries to connect to the SSH port on ipAddress with a 60-second timeout.
 // An error is returned if the connection fails.
@@ -84,8 +89,170 @@ func (ec AWSEc2DynamicConfig) getEC2Client(kubeClient client.Client, ctx context
 	return ec2.NewFromConfig(cfg), nil
 }
 
+func (ec AWSEc2DynamicConfig) isDedicatedHostConfig() bool {
+	return ec.Tenancy != "" && ec.HostResourceGroupArn != "" && ec.LicenseConfigurationArn != ""
+}
+
+func (ec AWSEc2DynamicConfig) launchSubnets() []string {
+	// DedicatedHosts don't support SubnetIds
+	if ec.isDedicatedHostConfig() {
+		if ec.SubnetId != "" {
+			return []string{ec.SubnetId}
+		}
+		return nil
+	}
+
+	// use SubnetIds if set, it's expected to store
+	// SubnetId as its first element
+	if len(ec.SubnetIds) > 0 {
+		return ec.SubnetIds
+	}
+
+	// fallback to SubnetId if SubnetIds is not set
+	if ec.SubnetId != "" {
+		return []string{ec.SubnetId}
+	}
+
+	return nil
+}
+
+func parseSubnetIds(primarySubnetId, fallbackSubnetIds string) []string {
+	sanitize := strings.TrimSpace
+
+	// parse the Primary Subnet
+	subnets := make([]string, 0, 1)
+	sanitizedPrimarySubnetId := sanitize(primarySubnetId)
+	if sanitizedPrimarySubnetId != "" {
+		subnets = append(subnets, sanitizedPrimarySubnetId)
+	}
+
+	// parse the FallBack Subnets
+	skip := func(s string) bool { return s == "" || s == sanitizedPrimarySubnetId }
+	fallbackSubnets := parseFallbackSubnetIds(fallbackSubnetIds, skip, sanitize)
+
+	// concat the subnets
+	return slices.Concat(subnets, fallbackSubnets)
+}
+
+func parseFallbackSubnetIds(fallbackSubnetIds string, skip func(string) bool, sanitize func(string) string) []string {
+	// define the separator
+	sep := ","
+
+	// create a big enough subnet slice
+	subnets := make([]string, 0, strings.Count(fallbackSubnetIds, sep))
+
+	// range on all sanitized splits
+	for s := range SplitSeqTransform(fallbackSubnetIds, sep, sanitize) {
+		// check the subnet isn't a duplicate and it not a value we should skip
+		if !slices.Contains(subnets, s) && !skip(s) {
+			subnets = append(subnets, s)
+		}
+	}
+
+	// release the un-needed capacity
+	return slices.Clip(subnets)
+}
+
+// SplitSeqTransform splits a string and applies a custom transformation function to each segment.
+func SplitSeqTransform(s, sep string, transform func(string) string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for segment := range strings.SplitSeq(s, sep) {
+			if !yield(transform(segment)) {
+				return
+			}
+		}
+	}
+}
+
+func (ec AWSEc2DynamicConfig) launchInstanceInSubnets(
+	ctx context.Context,
+	ec2Client ec2API,
+	log logr.Logger,
+	taskRunName, instanceTag string,
+	additionalInstanceTags map[string]string,
+) (cloud.InstanceIdentifier, error) {
+	var triedSubnets []string
+	var lastCapacityErr error
+
+	subnets := ec.launchSubnets()
+	if len(subnets) == 0 {
+		return "", fmt.Errorf("failed to launch EC2 instance for %s: %w", taskRunName, errors.New("no subnets configured"))
+	}
+
+	for _, subnetId := range ec.launchSubnets() {
+		triedSubnets = append(triedSubnets, subnetId)
+		log.Info("Attempting EC2 launch in subnet", "taskRunName", taskRunName, "subnetId", subnetId)
+
+		instanceID, err := ec.runInstancesInSubnetWithErrorLogging(
+			ctx, ec2Client, log, taskRunName, instanceTag, subnetId, additionalInstanceTags)
+		// suppress the InsufficientCapacityError to be able to fallback to next the subnet
+		if (err != nil && isInsufficientCapacityError(err)) || instanceID != "" {
+			return instanceID, err
+		}
+	}
+
+	return "", fmt.Errorf("failed to launch EC2 instance for %s: insufficient capacity in all configured subnets (tried: %s): %w",
+		taskRunName, strings.Join(triedSubnets, ", "), lastCapacityErr)
+}
+
+// runInstancesInSubnetWithErrorHandling tries to run the Instance in the given Subnet.
+// It logs the returned error before forwarding it the caller.
+func (ec AWSEc2DynamicConfig) runInstancesInSubnetWithErrorLogging(
+	ctx context.Context,
+	ec2Client ec2API,
+	log logr.Logger,
+	taskRunName, instanceTag, subnetId string,
+	additionalInstanceTags map[string]string,
+) (cloud.InstanceIdentifier, error) {
+	instanceID, err := ec.runInstancesInSubnet(ctx, ec2Client, taskRunName, instanceTag, subnetId, additionalInstanceTags)
+	switch {
+	case err == nil:
+		return instanceID, nil
+	case isInsufficientCapacityError(err):
+		log.Info("Insufficient capacity in subnet, trying next subnet if configured",
+			"taskRunName", taskRunName, "subnetId", subnetId, "error", err)
+		return "", err
+	case isThrottlingError(err):
+		log.Info("AWS API throttled during EC2 launch, deferring to reconciler retry",
+			"taskRunName", taskRunName, "subnetId", subnetId, "error", err)
+		return "", fmt.Errorf("failed to launch EC2 instance for %s: AWS API throttled: %w", taskRunName, err)
+	case errors.Is(err, errNoInstancesCreated) || strings.Contains(err.Error(), "failed to configure EC2 instance"):
+		return "", err
+	default:
+		return "", fmt.Errorf("failed to launch EC2 instance for %s: %w", taskRunName, err)
+	}
+}
+
+func (ec AWSEc2DynamicConfig) runInstancesInSubnet(
+	ctx context.Context,
+	ec2Client ec2API,
+	taskRunName, instanceTag, subnetId string,
+	additionalInstanceTags map[string]string,
+) (cloud.InstanceIdentifier, error) {
+	launchInput, err := ec.configureInstance(taskRunName, instanceTag, subnetId, additionalInstanceTags)
+	if err != nil {
+		return "", ec.wrapConfigureInstanceError(taskRunName, err)
+	}
+
+	runInstancesOutput, err := ec2Client.RunInstances(ctx, launchInput)
+	if err != nil {
+		return "", err
+	}
+	if len(runInstancesOutput.Instances) == 0 {
+		return "", errNoInstancesCreated
+	}
+	return cloud.InstanceIdentifier(*runInstancesOutput.Instances[0].InstanceId), nil
+}
+
+func (ec AWSEc2DynamicConfig) wrapConfigureInstanceError(taskRunName string, err error) error {
+	if strings.Contains(err.Error(), "MacOS") {
+		return fmt.Errorf("missing configuration fields mandatory for MacOS instances: %w", err)
+	}
+	return fmt.Errorf("failed to configure EC2 instance for %s: %w", taskRunName, err)
+}
+
 // configureInstance creates and returns an EC2 instance configuration.
-func (ec AWSEc2DynamicConfig) configureInstance(taskRunName string, instanceTag string, additionalInstanceTags map[string]string) (*ec2.RunInstancesInput, error) {
+func (ec AWSEc2DynamicConfig) configureInstance(taskRunName, instanceTag, subnetId string, additionalInstanceTags map[string]string) (*ec2.RunInstancesInput, error) {
 	// Validate that MacOS-specific fields are either all set or all empty
 	tenancySet := ec.Tenancy != ""
 	hostResourceGroupSet := ec.HostResourceGroupArn != ""
@@ -104,8 +271,8 @@ func (ec AWSEc2DynamicConfig) configureInstance(taskRunName string, instanceTag 
 	var placement *types.Placement
 	var licenseSpecifications []types.LicenseConfigurationRequest
 
-	if ec.SubnetId != "" {
-		subnet = aws.String(ec.SubnetId)
+	if subnetId != "" {
+		subnet = aws.String(subnetId)
 	}
 	if ec.SecurityGroup != "" {
 		securityGroups = []string{ec.SecurityGroup}

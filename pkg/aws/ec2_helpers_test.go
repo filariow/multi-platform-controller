@@ -82,7 +82,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 
 		When("configuring basic instance details", func() {
 			It("should correctly set KeyName, AMI, and InstanceType", func() {
-				runInput, err := ecConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+				runInput, err := ecConfig.configureInstance(taskRunName, instanceTag, ecConfig.SubnetId, additionalTags)
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(runInput.KeyName).To(Equal(&ecConfig.KeyName))
 				Expect(runInput.ImageId).To(Equal(&ecConfig.Ami))
@@ -91,7 +91,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 
 			It("should set MinCount, MaxCount, EbsOptimized, ShutdownBehavior with valid and default properties",
 				func() {
-					runInput, err := ecConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+					runInput, err := ecConfig.configureInstance(taskRunName, instanceTag, ecConfig.SubnetId, additionalTags)
 					Expect(err).ShouldNot(HaveOccurred())
 					By("Verifying the current specific values")
 					Expect(runInput.MinCount).To(Equal(aws.Int32(1)))
@@ -115,7 +115,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 				// of the ecConfig after going through configureInstance
 				func(setupConfig func() AWSEc2DynamicConfig, verify func(input *ec2.RunInstancesInput)) {
 					currentConfig := setupConfig()
-					runInput, _ := currentConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+					runInput, _ := currentConfig.configureInstance(taskRunName, instanceTag, currentConfig.SubnetId, additionalTags)
 					verify(runInput)
 				},
 				Entry("using baseline SubnetId and SecurityGroupId",
@@ -161,7 +161,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 				//content of the ecConfig after going through configureInstance
 				func(setupConfig func() AWSEc2DynamicConfig, verify func(input *ec2.RunInstancesInput)) {
 					currentConfig := setupConfig()
-					runInput, _ := currentConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+					runInput, _ := currentConfig.configureInstance(taskRunName, instanceTag, currentConfig.SubnetId, additionalTags)
 					verify(runInput)
 				},
 				Entry("using baseline InstanceProfileArn",
@@ -200,7 +200,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 
 		When("configuring tags", func() {
 			It("should include default and Name tags correctly with baseline config", func() {
-				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, ecConfig.SubnetId, additionalTags)
 				Expect(runInput.TagSpecifications).To(HaveLen(1))
 				Expect(runInput.TagSpecifications[0].ResourceType).To(Equal(types.ResourceTypeInstance))
 				tags := runInput.TagSpecifications[0].Tags
@@ -211,7 +211,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 
 			It("should include default and additional tags when provided", func() {
 				additionalTags["CostCenter"] = "AlphaTeam"
-				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, ecConfig.SubnetId, additionalTags)
 				tags := runInput.TagSpecifications[0].Tags
 				Expect(tags).To(HaveLen(3 + len(additionalTags)))
 				Expect(tags).To(ContainElement(SatisfyAll(HaveField("Key", PointTo(Equal("CostCenter"))), HaveField("Value", PointTo(Equal("AlphaTeam"))))))
@@ -220,7 +220,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 
 		When("configuring EBS block device mappings", func() {
 			It("should set EBS properties correctly based on baseline config", func() {
-				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, ecConfig.SubnetId, additionalTags)
 				Expect(runInput.BlockDeviceMappings).To(HaveLen(1))
 				bdMapping := runInput.BlockDeviceMappings[0]
 				Expect(bdMapping.DeviceName).To(PointTo(Equal("/dev/sda1")))
@@ -234,7 +234,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 				func(iops *int32, throughput *int32) {
 					ecConfig.Iops = iops
 					ecConfig.Throughput = throughput
-					runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+					runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, ecConfig.SubnetId, additionalTags)
 					ebsDevice := runInput.BlockDeviceMappings[0].Ebs
 					Expect(ebsDevice.Iops).To(Equal(iops))
 					Expect(ebsDevice.Throughput).To(Equal(throughput))
@@ -252,13 +252,13 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 				// commonUserData is from aws_test.go (raw script)
 				encodedCommonUserData := base64.StdEncoding.EncodeToString([]byte(commonUserData))
 				ecConfig.UserData = &encodedCommonUserData
-				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, ecConfig.SubnetId, additionalTags)
 				Expect(runInput.UserData).To(Equal(ecConfig.UserData))
 			})
 
 			It("should be nil if ecConfig.UserData is set to nil (overriding baseline if it had UserData)", func() {
 				ecConfig.UserData = nil
-				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+				runInput, _ := ecConfig.configureInstance(taskRunName, instanceTag, ecConfig.SubnetId, additionalTags)
 				Expect(runInput.UserData).To(Equal(ecConfig.UserData))
 			})
 		})
@@ -268,7 +268,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 				ecConfig.Tenancy = "host"
 				ecConfig.HostResourceGroupArn = "arn:aws:resource-groups:us-east-1:123456789012:group/mac-hosts"
 				ecConfig.LicenseConfigurationArn = "arn:aws:license-manager:us-east-1:123456789012:license-configuration:lic-macos"
-				runInput, err := ecConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+				runInput, err := ecConfig.configureInstance(taskRunName, instanceTag, ecConfig.SubnetId, additionalTags)
 
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(runInput.Placement).ShouldNot(BeNil())
@@ -281,7 +281,7 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 			DescribeTable("should return validation error when only one MacOS field is set",
 				func(setupConfig func() AWSEc2DynamicConfig) {
 					currentConfig := setupConfig()
-					_, err := currentConfig.configureInstance(taskRunName, instanceTag, additionalTags)
+					_, err := currentConfig.configureInstance(taskRunName, instanceTag, currentConfig.SubnetId, additionalTags)
 					Expect(err).Should(HaveOccurred())
 					Expect(err.Error()).Should(ContainSubstring("MacOS"))
 				},
@@ -378,6 +378,60 @@ var _ = Describe("AWS EC2 Helper Functions", func() {
 		})
 	})
 
+	Describe("parseSubnetIds", func() {
+		DescribeTable("returns nil on empty input",
+			func(primary, fallback string) {
+				Expect(parseSubnetIds(primary, fallback)).To(BeNil())
+			},
+			Entry("empty input", "", ""),
+			Entry("space only primary", "   ", ""),
+			Entry("space fallbacks", "", " , "),
+		)
+
+		DescribeTable("non empty primary",
+			func(primary, fallback string, expected []string) {
+				subnets := parseSubnetIds(primary, fallback)
+				Expect(subnets).ToNot(BeEmpty())
+				// check the primary is the first one
+				Expect(subnets[0]).To(Equal(expected[0]))
+				Expect(subnets).To(ConsistOf(expected))
+			},
+
+			// Sanitized input
+			Entry("primary only",
+				"subnet-a", "", []string{"subnet-a"}),
+			Entry("primary and fallbacks",
+				"subnet-a", "subnet-b,subnet-c", []string{"subnet-a", "subnet-b", "subnet-c"}),
+			Entry("dedupes primary repeated in fallbacks",
+				"subnet-a", "subnet-a,subnet-b", []string{"subnet-a", "subnet-b"}),
+
+			// Unsanitized input
+			Entry("unsanitized primary only",
+				" subnet-a ", "", []string{"subnet-a"}),
+			Entry("unsanitized primary and fallbacks",
+				" subnet-a ", " subnet-b , subnet-c ", []string{"subnet-a", "subnet-b", "subnet-c"}),
+			Entry("unsanitized dedupes primary repeated in fallbacks",
+				" subnet-a ", " subnet-a , subnet-b ", []string{"subnet-a", "subnet-b"}),
+		)
+
+		DescribeTable("empty primary",
+			func(primary, fallback string, expected []string) {
+				subnets := parseSubnetIds(primary, fallback)
+				Expect(subnets).ToNot(BeEmpty())
+				Expect(subnets).To(ConsistOf(expected))
+			},
+
+			// Sanitized input
+			Entry("empty primary with fallbacks",
+				"", "subnet-b,subnet-c", []string{"subnet-b", "subnet-c"}),
+
+			// Unsanitized input
+			Entry("unsanitized empty primary with fallbacks",
+				"", " subnet-b , subnet-c ", []string{"subnet-b", "subnet-c"}),
+			Entry("unsanitized space only primary with fallbacks",
+				"  ", " subnet-b , subnet-c ", []string{"subnet-b", "subnet-c"}),
+		)
+	})
 })
 
 // Helper function to create a baseline valid AWSEc2DynamicConfig for configureInstance tests

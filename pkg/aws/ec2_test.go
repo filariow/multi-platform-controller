@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/konflux-ci/multi-platform-controller/pkg/cloud"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -62,6 +63,7 @@ var _ = Describe("Ec2 Unit Test Suit", func() {
 				Expect(providerConfig.SecurityGroup).To(Equal("test-security-group"))
 				Expect(providerConfig.SecurityGroupId).To(Equal("test-security-group-id"))
 				Expect(providerConfig.SubnetId).To(Equal("test-subnet-id"))
+				Expect(providerConfig.SubnetIds).To(Equal([]string{"test-subnet-id"}))
 				Expect(providerConfig.InstanceProfileName).To(Equal("test-instance-profile-name"))
 				Expect(providerConfig.InstanceProfileArn).To(Equal("test-instance-profile-arn"))
 				Expect(providerConfig.Disk).To(Equal(int32(expectedDisk)))
@@ -99,6 +101,17 @@ var _ = Describe("Ec2 Unit Test Suit", func() {
 				"strict-public-address": "invalid"},
 				40, nil, nil, aws.String(commonUserData), false),
 		)
+
+		It("should parse fallback-subnet-ids into SubnetIds", func() {
+			config := map[string]string{
+				"dynamic.linux-arm64.region":              "test-region",
+				"dynamic.linux-arm64.subnet-id":           "subnet-primary",
+				"dynamic.linux-arm64.fallback-subnet-ids": "subnet-fallback-a, subnet-fallback-b,subnet-primary",
+			}
+			provider := CreateEc2CloudConfig("linux-arm64", config, systemNamespace)
+			providerConfig := provider.(AWSEc2DynamicConfig)
+			Expect(providerConfig.SubnetIds).To(Equal([]string{"subnet-primary", "subnet-fallback-a", "subnet-fallback-b"}))
+		})
 	})
 
 	Describe("Testing SshUser", func() {
@@ -166,6 +179,95 @@ var _ = Describe("Ec2 Unit Test Suit", func() {
 					_, err := cfg.LaunchInstance(nil, ctx, "invalid-no-colon", "tag", map[string]string{})
 
 					Expect(err).Should(MatchError(ContainSubstring("invalid TaskRun ID")))
+				})
+			})
+
+			When("the primary subnet has insufficient capacity", func() {
+				It("should retry in the fallback subnet", func(ctx SpecContext) {
+					cfg.SubnetIds = []string{"subnet-primary", "subnet-fallback"}
+					mock.RunInstancesErrs = []error{
+						&smithy.GenericAPIError{Code: "InsufficientInstanceCapacity", Message: "no capacity"},
+					}
+					mock.RunInstancesOutput = &ec2.RunInstancesOutput{
+						Instances: []types.Instance{{InstanceId: aws.String("i-fallback123")}},
+					}
+
+					id, err := cfg.LaunchInstance(nil, ctx, "ns:task", "tag", map[string]string{})
+
+					Expect(err).ShouldNot(HaveOccurred())
+					Expect(string(id)).Should(Equal("i-fallback123"))
+					Expect(mock.runInstancesCallCount).Should(Equal(2))
+					Expect(*mock.RunInstancesInputs[0].SubnetId).Should(Equal("subnet-primary"))
+					Expect(*mock.RunInstancesInputs[1].SubnetId).Should(Equal("subnet-fallback"))
+				})
+			})
+
+			When("the EC2 API returns a non-capacity error", func() {
+				It("should not try fallback subnets", func(ctx SpecContext) {
+					cfg.SubnetIds = []string{"subnet-primary", "subnet-fallback"}
+					mock.RunInstancesErr = errors.New("access denied")
+
+					_, err := cfg.LaunchInstance(nil, ctx, "ns:task", "tag", map[string]string{})
+
+					Expect(err).Should(MatchError(ContainSubstring("failed to launch EC2 instance")))
+					Expect(mock.runInstancesCallCount).Should(Equal(1))
+				})
+			})
+
+			When("all configured subnets have insufficient capacity", func() {
+				It("should return an error listing tried subnets", func(ctx SpecContext) {
+					cfg.SubnetIds = []string{"subnet-a", "subnet-b"}
+					capacityErr := &smithy.GenericAPIError{Code: "InsufficientInstanceCapacity", Message: "no capacity"}
+					mock.RunInstancesErrs = []error{capacityErr, capacityErr}
+
+					_, err := cfg.LaunchInstance(nil, ctx, "ns:task", "tag", map[string]string{})
+
+					Expect(err).Should(MatchError(ContainSubstring("insufficient capacity in all configured subnets")))
+					Expect(err.Error()).Should(ContainSubstring("subnet-a, subnet-b"))
+					Expect(mock.runInstancesCallCount).Should(Equal(2))
+				})
+			})
+
+			When("using Mac dedicated host configuration", func() {
+				It("should not try fallback subnets", func(ctx SpecContext) {
+					cfg.SubnetId = "subnet-primary"
+					cfg.SubnetIds = []string{"subnet-primary", "subnet-fallback"}
+					cfg.Tenancy = "host"
+					cfg.HostResourceGroupArn = "arn:aws:resource-groups:us-east-1:123:group/mac-hosts"
+					cfg.LicenseConfigurationArn = "arn:aws:license-manager:us-east-1:123:license-configuration:mac"
+					mock.RunInstancesErr = &smithy.GenericAPIError{Code: "InsufficientDedicatedHostCapacity", Message: "no capacity"}
+
+					_, err := cfg.LaunchInstance(nil, ctx, "ns:task", "tag", map[string]string{})
+
+					Expect(err).Should(MatchError(ContainSubstring("failed to launch EC2 instance")))
+					Expect(mock.runInstancesCallCount).Should(Equal(1))
+					Expect(*mock.RunInstancesInputs[0].SubnetId).Should(Equal("subnet-primary"))
+				})
+			})
+
+			When("the EC2 API is throttled", func() {
+				It("should stop trying fallback subnets and return quickly", func(ctx SpecContext) {
+					cfg.SubnetIds = []string{"subnet-primary", "subnet-fallback", "subnet-other"}
+					mock.RunInstancesErr = &smithy.GenericAPIError{Code: "RequestLimitExceeded", Message: "rate exceeded"}
+
+					_, err := cfg.LaunchInstance(nil, ctx, "ns:task", "tag", map[string]string{})
+
+					Expect(err).Should(MatchError(ContainSubstring("AWS API throttled")))
+					Expect(mock.runInstancesCallCount).Should(Equal(1))
+				})
+
+				It("should still try a fallback subnet after a capacity error", func(ctx SpecContext) {
+					cfg.SubnetIds = []string{"subnet-primary", "subnet-fallback"}
+					mock.RunInstancesErrs = []error{
+						&smithy.GenericAPIError{Code: "InsufficientInstanceCapacity", Message: "no capacity"},
+						&smithy.GenericAPIError{Code: "Throttling", Message: "rate exceeded"},
+					}
+
+					_, err := cfg.LaunchInstance(nil, ctx, "ns:task", "tag", map[string]string{})
+
+					Expect(err).Should(MatchError(ContainSubstring("AWS API throttled")))
+					Expect(mock.runInstancesCallCount).Should(Equal(2))
+					Expect(*mock.RunInstancesInputs[1].SubnetId).Should(Equal("subnet-fallback"))
 				})
 			})
 		})

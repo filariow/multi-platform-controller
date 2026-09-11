@@ -56,6 +56,9 @@ func CreateEc2CloudConfig(platformName string, config map[string]string, systemN
 		userDataPtr = &base64val
 	}
 
+	subnetId := config["dynamic."+platformName+".subnet-id"]
+	fallbackSubnetIds := config["dynamic."+platformName+".fallback-subnet-ids"]
+
 	return AWSEc2DynamicConfig{Region: config["dynamic."+platformName+".region"],
 		Ami:                     config["dynamic."+platformName+".ami"],
 		InstanceType:            config["dynamic."+platformName+".instance-type"],
@@ -63,7 +66,8 @@ func CreateEc2CloudConfig(platformName string, config map[string]string, systemN
 		Secret:                  config["dynamic."+platformName+".aws-secret"],
 		SecurityGroup:           config["dynamic."+platformName+".security-group"],
 		SecurityGroupId:         config["dynamic."+platformName+".security-group-id"],
-		SubnetId:                config["dynamic."+platformName+".subnet-id"],
+		SubnetId:                subnetId,
+		SubnetIds:               parseSubnetIds(subnetId, fallbackSubnetIds),
 		InstanceProfileName:     config["dynamic."+platformName+".instance-profile-name"],
 		InstanceProfileArn:      config["dynamic."+platformName+".instance-profile-arn"],
 		StrictPublicAddress:     config["dynamic."+platformName+".strict-public-address"] == "true",
@@ -85,36 +89,17 @@ func (ec AWSEc2DynamicConfig) LaunchInstance(kubeClient client.Client, ctx conte
 		return "", fmt.Errorf("invalid TaskRun ID: %w", err)
 	}
 	taskRunName := strings.Split(taskRunID, ":")[1]
-	// Add TaskRun ID to additional tags
 	additionalInstanceTags[cloud.TaskRunTagKey] = taskRunID
 
 	log := logr.FromContextOrDiscard(ctx)
 	log.Info("Attempting to launch AWS EC2 instance", "taskRunName", taskRunName)
 
-	// Use AWS credentials and configuration to create an EC2 client
 	ec2Client, err := ec.getEC2Client(kubeClient, ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to create an EC2 client: %w", err)
 	}
 
-	// Launch the new EC2 instance
-	launchInput, err := ec.configureInstance(taskRunName, instanceTag, additionalInstanceTags)
-	if err != nil {
-		if strings.Contains(err.Error(), "MacOS") {
-			return "", fmt.Errorf("missing configuration fields mandatory for MacOS instances: %w", err)
-		}
-		return "", fmt.Errorf("failed to configure EC2 instance for %s: %w", taskRunName, err)
-	}
-	runInstancesOutput, err := ec2Client.RunInstances(ctx, launchInput)
-	if err != nil {
-		return "", fmt.Errorf("failed to launch EC2 instance for %s: %w", taskRunName, err)
-	}
-
-	if len(runInstancesOutput.Instances) > 0 {
-		//TODO: clarify comment -> hard coded 10m timeout
-		return cloud.InstanceIdentifier(*runInstancesOutput.Instances[0].InstanceId), nil
-	}
-	return "", errors.New("no EC2 instances were created")
+	return ec.launchInstanceInSubnets(ctx, ec2Client, log, taskRunName, instanceTag, additionalInstanceTags)
 }
 
 // CountInstances returns the number of EC2 instances whose names start with instanceTag.
@@ -342,8 +327,12 @@ type AWSEc2DynamicConfig struct {
 	// the instance.
 	SecurityGroupId string
 
-	// SubnetId is the ID of the subnet to use when creating the instance.
+	// SubnetId is the ID of the primary subnet to use when creating the instance.
 	SubnetId string
+
+	// SubnetIds is the ordered list of subnets to try when launching an instance.
+	// Built from subnet-id and optional fallback-subnet-ids at config parse time.
+	SubnetIds []string
 
 	// Disk is the amount of permanent storage (in GB) to allocate the instance.
 	Disk int32

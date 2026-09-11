@@ -7,18 +7,34 @@ import (
 )
 
 // mockEC2Client satisfies the ec2API interface for testing.
-// Output/Err fields control return values; Input fields capture the last call.
+// Output/Err fields control return values; Input fields capture calls.
 type mockEC2Client struct {
 	RunInstancesOutput      *ec2.RunInstancesOutput
 	RunInstancesErr         error
+	RunInstancesErrs        []error
+	RunInstancesInputs      []*ec2.RunInstancesInput
+	runInstancesCallCount   int
 	DescribeInstancesOutput *ec2.DescribeInstancesOutput
 	DescribeInstancesErr    error
 	DescribeInstancesInput  *ec2.DescribeInstancesInput
 	TerminateInstancesErr   error
 }
 
-func (m *mockEC2Client) RunInstances(_ context.Context, _ *ec2.RunInstancesInput, _ ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
-	return m.RunInstancesOutput, m.RunInstancesErr
+func (m *mockEC2Client) RunInstances(_ context.Context, input *ec2.RunInstancesInput, _ ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
+	m.RunInstancesInputs = append(m.RunInstancesInputs, input)
+	idx := m.runInstancesCallCount
+	m.runInstancesCallCount++
+
+	if len(m.RunInstancesErrs) > 0 {
+		if idx < len(m.RunInstancesErrs) {
+			if err := m.RunInstancesErrs[idx]; err != nil {
+				return nil, err
+			}
+		}
+	} else if m.RunInstancesErr != nil {
+		return nil, m.RunInstancesErr
+	}
+	return m.RunInstancesOutput, nil
 }
 
 func (m *mockEC2Client) DescribeInstances(_ context.Context, input *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
